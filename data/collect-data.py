@@ -3,8 +3,8 @@ Author: Andrew Szoke (ajszoke)
 Email: zoke2556@gmail.com
 Created: Spring 2020
 
-This script scrapes data from basketball-reference.com to compile each team's running W-L record as
-a function of each individual game. It outputs the results of each year into the 'data.json' file
+This script scrapes data from pro-football-reference.com to compile each team's running W-L record
+as a function of each individual game. It outputs the results of each year into the 'data.json' file
 located within this directory.
 """
 
@@ -14,13 +14,12 @@ import urllib3
 from bs4 import BeautifulSoup
 
 # consts
-START_YEAR = 1968  # first year in 82-game era
+START_YEAR = 1978  # first year in 82-game era
 END_YEAR = 2020
 NUM_GAMES_IN_A_SEASON = 16
-OUTPUT_FILENAME_DETAIL = 'data.json'
-OUTPUT_FILENAME_TOPLINE = 'avgLosingTeamGamesFrom500.csv'
-URL_TEMPLATE = 'https://www.basketball-reference.com/leagues/NBA_{year}_games-{month}.html'
-months = ['september', 'october', 'november', 'december', 'january', 'february', 'march', 'april', 'may', 'june']
+OUTPUT_FILENAME_DETAIL = 'nfl-data.json'
+OUTPUT_FILENAME_TOPLINE = 'nfl-avgLosingTeamGamesFrom500.csv'
+URL_TEMPLATE = 'https://www.pro-football-reference.com/years/{year}/games.htm'
 
 # logging
 LOG_FORMAT = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -49,35 +48,31 @@ def make_soup(url):
 
 
 def process_game_row(tr, teamGamesPlayed, year):
-    vizTeam = tr.find(name="td", attrs={'data-stat': 'visitor_team_name'}).find('a').get_text()
-    vizPts = int(tr.find(name="td", attrs={'data-stat': 'visitor_pts'}).get_text())
-
-    homeTeam = tr.find(name="td", attrs={'data-stat': 'home_team_name'}).find('a').get_text()
-    homePts = int(tr.find(name="td", attrs={'data-stat': 'home_pts'}).get_text())
-
-    # n.b.: nba games cannot end in a tie
-    winningTeam = vizTeam if vizPts > homePts else homeTeam
-    losingTeam = vizTeam if vizPts < homePts else homeTeam
+    winningTeam = tr.find(name="td", attrs={'data-stat': 'winner'}).find('a').get_text()
+    losingTeam = tr.find(name="td", attrs={'data-stat': 'loser'}).find('a').get_text()
+    isTie = tr.find(name="td", attrs={'data-stat': 'pts_win'}).get_text() == \
+            tr.find(name="td", attrs={'data-stat': 'pts_lose'}).get_text()
 
     for team in [winningTeam, losingTeam]:
         # increment each team's game number
         teamGameNo = 1 if team not in teamGamesPlayed else teamGamesPlayed.get(team) + 1
         teamGamesPlayed[team] = teamGameNo
 
+        if isTie:
+            deltaWins = 0.5
+        else:
+            deltaWins = 1 if team == winningTeam else 0
+
         # initialize year-gameNum entry if needed
         if teamGameNo not in result[year]:
             result[year][teamGameNo] = {'totalGamesFrom500': 0}
 
         if teamGameNo != 1:
-            teamWins = result[year][teamGameNo - 1][team].get('wins')
-            if team == winningTeam:
-                teamWins += 1
-            teamLosses = teamGameNo - teamWins
+            teamWins = result[year][teamGameNo - 1][team].get('wins') + deltaWins
         else:
-            teamWins = 1 if team == winningTeam else 0
-            teamLosses = 0 if team == winningTeam else 1
+            teamWins = deltaWins
 
-        teamDistFrom500 = teamWins - teamLosses
+        teamDistFrom500 = teamWins - (teamGameNo / 2)
         if teamDistFrom500 > 0:
             recordKind = 'winning'
         elif teamDistFrom500 < 0:
@@ -103,55 +98,28 @@ def process_game_row(tr, teamGamesPlayed, year):
 for year in range(START_YEAR, END_YEAR + 1):
     result[year] = {}
     teamGamesPlayed = {}
-    yearComplete = False
     seasonStr = str(year - 1) + '-' + str(year)
 
-    for month in months:
+    thisUrl = URL_TEMPLATE.format(year=year)
+    soup = make_soup(thisUrl)
 
-        # malformed page as of 4/11/20; no games
-        if month == 'september' and year == 2019:
-            continue
-
-        # no marked end of regular season for certain years
-        if month == 'april' and year in [1980, 2020]:
-            break
-
-        thisUrl = URL_TEMPLATE.format(year=year, month=month)
-        soup = make_soup(thisUrl)
-
-        # check if month contains games played
-        noGamesPlayed = soup.find(name='h1', text='Page Not Found (404 error)') is not None
-        if noGamesPlayed:
-            logYear = str(year)
-            if month in ['september', 'october', 'november', 'december']:
-                logYear = str(year - 1)
-            logger.info('No game data for ' + month + ' ' + logYear)
-            continue
-
-        # try to find playoffs divider
-        postseasonLine = soup.find(name='th', text='Playoffs')
-        if postseasonLine is not None:
-            postseasonLine = postseasonLine.find_parent('tr')
-
-        # iterate over game rows
-        gameTable = soup.find(name='table', id='schedule').find('tbody')
-        trs = gameTable.find_all('tr')
-        for tr in trs:
-            if tr is not postseasonLine:
+    # iterate over game rows
+    gameTable = soup.find(name='table', id='games').find('tbody')
+    trs = gameTable.find_all('tr')
+    for tr in trs:
+        firstCell = tr.find(name='th', attrs={'class': 'right'})
+        if firstCell is not None:
+            firstCellVal = firstCell.get_text()
+            try:
+                int(firstCellVal)  # check if the cell is a week number
                 process_game_row(tr, teamGamesPlayed, year)
-            else:
-                yearComplete = True
-                break
-
-        if yearComplete:
-            break
+            except ValueError:
+                if firstCellVal != 'Week':
+                    break  # start of playoffs
 
     # end-of-season calculations
 
-    lastGameNo = 82  # default, may be overwritten below
-    if year == 2020:
-        lastGameNo = 63  # last game with all 30 teams
-        shortSeasons[year] = lastGameNo
+    lastGameNo = 17  # default, may be overwritten below
     for gameNo in range(1, lastGameNo + 1):
         # calculate the avg dist from 500
         try:
